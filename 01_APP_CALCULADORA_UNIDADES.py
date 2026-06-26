@@ -1,11 +1,12 @@
 # =====================================================
 # 01_APP_CALCULADORA_UNIDADES.py
-# VERSION 4
+# VERSION 5
 # APP CALCULADORA DE MATERIAS PRIMAS POR UNIDADES
 # PROYECTO CCU - ELABORACIÓN
 # =====================================================
 
 import base64
+import re
 from datetime import date
 from io import BytesIO
 from pathlib import Path
@@ -21,7 +22,7 @@ import streamlit as st
 st.set_page_config(
     page_title="Calculadora de Unidades - CCU",
     page_icon="🧮",
-    layout="centered",
+    layout="wide",
     initial_sidebar_state="collapsed"
 )
 
@@ -44,9 +45,9 @@ st.markdown(
     """
     <style>
     .block-container {
-        padding-top: 1rem;
+        padding-top: 1.2rem;
         padding-bottom: 2rem;
-        max-width: 1040px;
+        max-width: 1280px;
     }
 
     header[data-testid="stHeader"] {
@@ -79,19 +80,19 @@ st.markdown(
         justify-content: center;
         align-items: center;
         margin-top: 0px;
-        margin-bottom: 10px;
+        margin-bottom: 8px;
         width: 100%;
     }
 
     .logo-container img {
-        max-width: 135px;
+        max-width: 120px;
         height: auto;
         display: block;
     }
 
     .titulo-principal {
         text-align: center;
-        font-size: 28px;
+        font-size: 30px;
         font-weight: 800;
         color: #003865;
         margin-top: 0px;
@@ -103,15 +104,24 @@ st.markdown(
         text-align: center;
         font-size: 15px;
         color: #666666;
-        margin-bottom: 24px;
+        margin-bottom: 22px;
+    }
+
+    .card {
+        background-color: #FFFFFF;
+        border: 1px solid #E1E4E8;
+        border-radius: 12px;
+        padding: 18px 18px 10px 18px;
+        margin-bottom: 14px;
+        box-shadow: 0px 1px 2px rgba(0,0,0,0.04);
     }
 
     .seccion {
-        font-size: 18px;
-        font-weight: 700;
+        font-size: 19px;
+        font-weight: 800;
         color: #003865;
-        margin-top: 8px;
-        margin-bottom: 10px;
+        margin-top: 4px;
+        margin-bottom: 12px;
     }
 
     .mensaje-ok {
@@ -200,10 +210,9 @@ st.markdown(
 # FUNCIONES DE APOYO
 # =====================================================
 
-def mostrar_logo_centrado(ruta_logo: Path, ancho_px: int = 135) -> None:
+def mostrar_logo_centrado(ruta_logo: Path, ancho_px: int = 120) -> None:
     """
     Muestra el logo centrado usando HTML/base64.
-    Esto evita que quede desalineado o cortado por el encabezado de Streamlit.
     """
 
     if not ruta_logo.exists():
@@ -222,10 +231,142 @@ def mostrar_logo_centrado(ruta_logo: Path, ancho_px: int = 135) -> None:
     )
 
 
+def limpiar_texto(valor) -> str:
+    """
+    Limpia valores de texto.
+    """
+
+    if pd.isna(valor):
+        return ""
+
+    texto = str(valor).strip()
+
+    if texto.lower() in ["nan", "none", "nat"]:
+        return ""
+
+    texto = re.sub(r"\s+", " ", texto)
+
+    return texto
+
+
+def extraer_codigo_desde_texto(texto: str) -> str:
+    """
+    Extrae un código probable desde la materia prima cuando la columna Código viene vacía
+    o cuando el código quedó mezclado dentro del nombre.
+
+    Prioridad:
+    1. Código tipo E + números, ejemplo E56685, E100704.
+    2. Código con asteriscos, ejemplo 35009*60*01A.
+    3. Código alfanumérico entre paréntesis, ejemplo 17B71ASK.
+    """
+
+    texto = limpiar_texto(texto)
+
+    if texto == "":
+        return ""
+
+    # Código tipo E56685 / E100704 / E30670
+    match_e = re.search(r"\bE\d{4,}\b", texto, flags=re.IGNORECASE)
+    if match_e:
+        return match_e.group(0).upper()
+
+    # Código con asteriscos
+    match_ast = re.search(r"\b\d{3,}\*\d+[A-Z0-9*]*\b", texto, flags=re.IGNORECASE)
+    if match_ast:
+        return match_ast.group(0).upper()
+
+    # Primer texto entre paréntesis si parece código alfanumérico
+    parentesis = re.findall(r"\(([^)]{3,40})\)", texto)
+    for item in parentesis:
+        item = item.strip()
+        if re.fullmatch(r"[A-Z0-9*\-/.]+", item, flags=re.IGNORECASE):
+            return item.upper()
+
+    return ""
+
+
+def normalizar_codigo(codigo, materia_prima: str) -> str:
+    """
+    Normaliza la columna Código.
+    Si viene vacía, intenta extraerla desde la materia prima.
+    """
+
+    codigo = limpiar_texto(codigo)
+    materia_prima = limpiar_texto(materia_prima)
+
+    if codigo != "":
+        return codigo
+
+    return extraer_codigo_desde_texto(materia_prima)
+
+
+def limpiar_nombre_materia_prima(materia_prima: str) -> str:
+    """
+    Limpia el nombre visible de la materia prima.
+
+    En algunas bases el nombre viene así:
+    Acesulfamo de Potasio (17B71ASK) (E56685 2000304212 SA F0000014161)
+
+    Esta función lo deja más limpio:
+    Acesulfamo de Potasio
+    """
+
+    texto = limpiar_texto(materia_prima)
+
+    if texto == "":
+        return ""
+
+    # Quitar todos los paréntesis y su contenido
+    texto = re.sub(r"\([^)]*\)", "", texto)
+
+    # Quitar códigos técnicos frecuentes que quedan fuera de paréntesis
+    texto = re.sub(r"\bE\d{4,}\b", "", texto, flags=re.IGNORECASE)
+    texto = re.sub(r"\bF\d{5,}\b", "", texto, flags=re.IGNORECASE)
+    texto = re.sub(r"\b20\d{8,}\b", "", texto)
+    texto = re.sub(r"\bSA\b", "", texto, flags=re.IGNORECASE)
+    texto = re.sub(r"\bLF\b", "", texto, flags=re.IGNORECASE)
+
+    # Limpieza final
+    texto = re.sub(r"\s+", " ", texto).strip(" -_/.")
+
+    return texto
+
+
+def nombre_archivo_seguro(texto: str) -> str:
+    """
+    Limpia texto para usarlo como nombre de archivo.
+    """
+
+    reemplazos = {
+        "/": "-",
+        "\\": "-",
+        ":": "-",
+        "*": "",
+        "?": "",
+        '"': "",
+        "<": "",
+        ">": "",
+        "|": ""
+    }
+
+    texto = str(texto)
+
+    for malo, bueno in reemplazos.items():
+        texto = texto.replace(malo, bueno)
+
+    texto = texto.replace(" ", "_")
+
+    return texto
+
+
+# =====================================================
+# CARGA Y NORMALIZACIÓN DE BBDD
+# =====================================================
+
 @st.cache_data
 def cargar_bbdd() -> pd.DataFrame:
     """
-    Carga y limpia la BBDD Parquet.
+    Carga, limpia y normaliza la BBDD Parquet.
     """
 
     if not ARCHIVO_BBDD.exists():
@@ -255,10 +396,35 @@ def cargar_bbdd() -> pd.DataFrame:
 
     df = df[columnas_necesarias].copy()
 
-    df["Tipo de elaboración"] = df["Tipo de elaboración"].fillna("").astype(str).str.strip()
-    df["Materia prima"] = df["Materia prima"].fillna("").astype(str).str.strip()
-    df["Código"] = df["Código"].fillna("").astype(str).str.strip()
-    df["Unidad medida"] = df["Unidad medida"].fillna("Sin unidad explícita").astype(str).str.strip()
+    df["Tipo de elaboración"] = df["Tipo de elaboración"].apply(limpiar_texto)
+    df["Materia prima original"] = df["Materia prima"].apply(limpiar_texto)
+
+    # Primero normalizamos código usando la materia original
+    df["Código"] = df.apply(
+        lambda row: normalizar_codigo(
+            row["Código"],
+            row["Materia prima original"]
+        ),
+        axis=1
+    )
+
+    # Luego limpiamos nombre de materia prima visible
+    df["Materia prima"] = df["Materia prima original"].apply(limpiar_nombre_materia_prima)
+
+    df["Unidad medida"] = (
+        df["Unidad medida"]
+        .fillna("Sin unidad explícita")
+        .astype(str)
+        .str.strip()
+    )
+
+    df["Unidad medida"] = df["Unidad medida"].replace(
+        {
+            "": "Sin unidad explícita",
+            "nan": "Sin unidad explícita",
+            "None": "Sin unidad explícita"
+        }
+    )
 
     df["Cantidad por unidad"] = pd.to_numeric(
         df["Cantidad por unidad"],
@@ -278,6 +444,27 @@ def cargar_bbdd() -> pd.DataFrame:
         (df["Materia prima"] != "")
     ].copy()
 
+    # Si una misma materia prima y código se repite dentro de la elaboración, se consolida
+    df = (
+        df
+        .groupby(
+            [
+                "Tipo de elaboración",
+                "Materia prima",
+                "Código",
+                "Unidad medida"
+            ],
+            as_index=False
+        )
+        .agg(
+            Cantidad_por_unidad=("Cantidad por unidad", "sum")
+        )
+    )
+
+    df = df.rename(columns={
+        "Cantidad_por_unidad": "Cantidad por unidad"
+    })
+
     df = df.sort_values(
         [
             "Tipo de elaboración",
@@ -291,6 +478,10 @@ def cargar_bbdd() -> pd.DataFrame:
 
     return df
 
+
+# =====================================================
+# FUNCIONES DE CÁLCULO
+# =====================================================
 
 def generar_calculo(df_bbdd: pd.DataFrame, tipo_elaboracion: str, unidades: int) -> pd.DataFrame:
     """
@@ -325,7 +516,7 @@ def generar_calculo(df_bbdd: pd.DataFrame, tipo_elaboracion: str, unidades: int)
 
 def tabla_resultado_simple(df_resultado: pd.DataFrame) -> pd.DataFrame:
     """
-    Tabla principal simple para el usuario.
+    Tabla principal simple.
     """
 
     df_simple = df_resultado[
@@ -344,7 +535,7 @@ def tabla_resultado_simple(df_resultado: pd.DataFrame) -> pd.DataFrame:
 
 def tabla_detalle_unitario(df_resultado: pd.DataFrame) -> pd.DataFrame:
     """
-    Tabla de detalle unitario, colapsada por defecto.
+    Tabla de detalle unitario colapsada.
     """
 
     df_detalle = df_resultado[
@@ -366,8 +557,7 @@ def tabla_detalle_unitario(df_resultado: pd.DataFrame) -> pd.DataFrame:
 
 def crear_base_fichas(df_resultado: pd.DataFrame) -> pd.DataFrame:
     """
-    Crea una tabla editable para levantar fichas técnicas.
-    Es una versión más amigable que crear un formulario individual por materia prima.
+    Crea una tabla editable para fichas técnicas.
     """
 
     df_fichas = df_resultado[
@@ -401,7 +591,7 @@ def generar_registro_una_fila(
     observacion: str
 ) -> pd.DataFrame:
     """
-    Genera un registro completo en una sola fila:
+    Genera registro completo en una sola fila:
     datos generales + cálculo + fichas técnicas.
     """
 
@@ -416,11 +606,10 @@ def generar_registro_una_fila(
         "Observación": observacion
     }
 
-    # Materias primas calculadas
     for _, row in df_resultado.iterrows():
-        materia = str(row["Materia prima"]).strip()
-        codigo = str(row["Código"]).strip()
-        unidad_medida = str(row["Unidad medida"]).strip()
+        materia = limpiar_texto(row["Materia prima"])
+        codigo = limpiar_texto(row["Código"])
+        unidad_medida = limpiar_texto(row["Unidad medida"])
 
         nombre_base = f"{materia} ({codigo})" if codigo != "" else materia
 
@@ -428,11 +617,10 @@ def generar_registro_una_fila(
         fila_registro[f"{nombre_base} Cantidad por unidad"] = row["Cantidad por unidad"]
         fila_registro[f"{nombre_base} Cantidad calculada"] = row["Cantidad requerida"]
 
-    # Fichas técnicas
     if df_fichas is not None and len(df_fichas) > 0:
         for _, row in df_fichas.iterrows():
-            materia = str(row.get("Materia prima", "")).strip()
-            codigo = str(row.get("Código", "")).strip()
+            materia = limpiar_texto(row.get("Materia prima", ""))
+            codigo = limpiar_texto(row.get("Código", ""))
 
             nombre_base = f"{materia} ({codigo})" if codigo != "" else materia
 
@@ -446,6 +634,10 @@ def generar_registro_una_fila(
     return pd.DataFrame([fila_registro])
 
 
+# =====================================================
+# EXPORTACIÓN A EXCEL
+# =====================================================
+
 def convertir_excel(
     df_resultado: pd.DataFrame,
     df_fichas: pd.DataFrame,
@@ -455,8 +647,8 @@ def convertir_excel(
     unidades: int
 ) -> BytesIO:
     """
-    Genera Excel descargable con:
-    - Resultado simple
+    Genera Excel descargable:
+    - Resultado
     - Detalle unitario
     - Fichas técnicas
     - Registro completo
@@ -535,33 +727,6 @@ def convertir_excel(
     return output
 
 
-def nombre_archivo_seguro(texto: str) -> str:
-    """
-    Limpia texto para usarlo como nombre de archivo.
-    """
-
-    reemplazos = {
-        "/": "-",
-        "\\": "-",
-        ":": "-",
-        "*": "",
-        "?": "",
-        '"': "",
-        "<": "",
-        ">": "",
-        "|": ""
-    }
-
-    texto = str(texto)
-
-    for malo, bueno in reemplazos.items():
-        texto = texto.replace(malo, bueno)
-
-    texto = texto.replace(" ", "_")
-
-    return texto
-
-
 # =====================================================
 # CARGAR BBDD
 # =====================================================
@@ -573,7 +738,7 @@ df_bbdd = cargar_bbdd()
 # ENCABEZADO
 # =====================================================
 
-mostrar_logo_centrado(ARCHIVO_LOGO, ancho_px=135)
+mostrar_logo_centrado(ARCHIVO_LOGO, ancho_px=120)
 
 st.markdown(
     """
@@ -588,30 +753,38 @@ st.markdown(
 # FORMULARIO PRINCIPAL
 # =====================================================
 
-st.markdown('<div class="seccion">Datos del cálculo</div>', unsafe_allow_html=True)
+st.markdown('<div class="card">', unsafe_allow_html=True)
+st.markdown('<div class="seccion">Datos generales</div>', unsafe_allow_html=True)
 
 with st.form("form_calculo"):
-    fecha_calculo = st.date_input(
-        "Fecha",
-        value=date.today()
-    )
+    col1, col2, col3 = st.columns([1.2, 2.2, 1.1])
 
-    tipos_elaboracion = sorted(df_bbdd["Tipo de elaboración"].unique())
+    with col1:
+        fecha_calculo = st.date_input(
+            "Fecha",
+            value=date.today()
+        )
 
-    tipo_seleccionado = st.selectbox(
-        "Tipo de elaboración",
-        options=tipos_elaboracion,
-        index=0
-    )
+    with col2:
+        tipos_elaboracion = sorted(df_bbdd["Tipo de elaboración"].unique())
 
-    unidades = st.number_input(
-        "Número de unidades",
-        min_value=1,
-        value=1,
-        step=1
-    )
+        tipo_seleccionado = st.selectbox(
+            "Tipo de elaboración",
+            options=tipos_elaboracion,
+            index=0
+        )
+
+    with col3:
+        unidades = st.number_input(
+            "Número de unidades",
+            min_value=1,
+            value=1,
+            step=1
+        )
 
     calcular = st.form_submit_button("Calcular materias primas")
+
+st.markdown('</div>', unsafe_allow_html=True)
 
 
 # =====================================================
@@ -642,43 +815,79 @@ if st.session_state.get("calculo_generado", False):
     st.markdown(
         f"""
         <div class="mensaje-ok">
-            Cálculo generado para <b>{tipo_seleccionado}</b> con <b>{unidades}</b> unidades.
+            Registro de prueba generado correctamente.<br>
+            <b>Elaboración:</b> {tipo_seleccionado}<br>
+            <b>Unidades solicitadas:</b> {unidades}<br>
+            <b>Materias primas requeridas:</b> {len(df_simple)}
         </div>
         """,
         unsafe_allow_html=True
     )
 
-    st.markdown('<div class="seccion">Resultado</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="seccion">Materias primas requeridas</div>', unsafe_allow_html=True)
 
     st.dataframe(
         df_simple,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        column_config={
+            "Materia prima": st.column_config.TextColumn(
+                "Materia prima",
+                width="large"
+            ),
+            "Código": st.column_config.TextColumn(
+                "Código",
+                width="medium"
+            ),
+            "Cantidad requerida": st.column_config.NumberColumn(
+                "Cantidad requerida",
+                format="%.6f"
+            ),
+            "Unidad medida": st.column_config.TextColumn(
+                "Unidad medida",
+                width="small"
+            )
+        }
     )
 
     with st.expander("Ver detalle de cantidad unitaria", expanded=False):
         st.dataframe(
             df_detalle,
             use_container_width=True,
-            hide_index=True
+            hide_index=True,
+            column_config={
+                "Cantidad por unidad": st.column_config.NumberColumn(
+                    "Cantidad por unidad",
+                    format="%.6f"
+                ),
+                "Cantidad requerida": st.column_config.NumberColumn(
+                    "Cantidad requerida",
+                    format="%.6f"
+                )
+            }
         )
 
+    st.markdown('</div>', unsafe_allow_html=True)
+
     # =================================================
-    # REGISTRO OPCIONAL
+    # DATOS DE REGISTRO, SIMILAR A LA INTERFAZ ORIGINAL
     # =================================================
 
-    with st.expander("Completar registro opcional", expanded=False):
+    with st.expander("Completar datos de registro y fichas técnicas", expanded=False):
         st.markdown(
             """
             <div class="mensaje-alerta">
-                Esta sección es opcional. Sirve para guardar datos generales y fichas técnicas
-                junto con el cálculo.
+                Esta sección permite registrar información adicional del proceso:
+                orden de elaboración, destino, turno, operador y fichas técnicas por materia prima.
             </div>
             """,
             unsafe_allow_html=True
         )
 
-        col1, col2 = st.columns(2)
+        st.markdown('<div class="seccion">Datos del registro</div>', unsafe_allow_html=True)
+
+        col1, col2, col3 = st.columns([1.4, 1.6, 1])
 
         with col1:
             orden_elaboracion = st.text_input(
@@ -686,6 +895,7 @@ if st.session_state.get("calculo_generado", False):
                 placeholder="Ej: 7100059000"
             )
 
+        with col2:
             destino = st.selectbox(
                 "Destino",
                 options=[
@@ -696,23 +906,26 @@ if st.session_state.get("calculo_generado", False):
                 index=0
             )
 
-        with col2:
+        with col3:
             turno = st.selectbox(
                 "Turno",
                 options=["A", "B", "C"],
                 index=0
             )
 
+        col4, col5 = st.columns([1.4, 2.2])
+
+        with col4:
             operador = st.text_input(
                 "Operador",
                 placeholder="Ej: R. Toledo"
             )
 
-        observacion = st.text_area(
-            "Observación",
-            placeholder="Observación del registro",
-            height=80
-        )
+        with col5:
+            observacion = st.text_input(
+                "Observación",
+                placeholder="Observación general"
+            )
 
         st.markdown('<div class="seccion">Fichas técnicas</div>', unsafe_allow_html=True)
 
@@ -724,6 +937,21 @@ if st.session_state.get("calculo_generado", False):
             hide_index=True,
             num_rows="fixed",
             column_config={
+                "Materia prima": st.column_config.TextColumn(
+                    "Materia prima",
+                    disabled=True,
+                    width="large"
+                ),
+                "Código": st.column_config.TextColumn(
+                    "Código",
+                    disabled=True,
+                    width="medium"
+                ),
+                "Unidad medida": st.column_config.TextColumn(
+                    "Unidad medida",
+                    disabled=True,
+                    width="small"
+                ),
                 "Inspección visual": st.column_config.SelectboxColumn(
                     "Inspección visual",
                     options=["Cumple", "No cumple"],
@@ -753,20 +981,29 @@ if st.session_state.get("calculo_generado", False):
                 hide_index=True
             )
 
-    # Si no se completó la sección opcional, se descarga igual con fichas base vacías
-    df_fichas_descarga = crear_base_fichas(df_resultado)
+        st.session_state["df_fichas"] = df_fichas
+        st.session_state["df_registro"] = df_registro
 
-    df_registro_descarga = generar_registro_una_fila(
-        df_resultado=df_resultado,
-        df_fichas=df_fichas_descarga,
-        fecha_calculo=fecha_calculo,
-        orden_elaboracion="",
-        tipo_elaboracion=tipo_seleccionado,
-        unidades=unidades,
-        destino="",
-        turno="",
-        operador="",
-        observacion=""
+    # =================================================
+    # DESCARGA
+    # =================================================
+
+    df_fichas_descarga = st.session_state.get("df_fichas", crear_base_fichas(df_resultado))
+
+    df_registro_descarga = st.session_state.get(
+        "df_registro",
+        generar_registro_una_fila(
+            df_resultado=df_resultado,
+            df_fichas=df_fichas_descarga,
+            fecha_calculo=fecha_calculo,
+            orden_elaboracion="",
+            tipo_elaboracion=tipo_seleccionado,
+            unidades=unidades,
+            destino="",
+            turno="",
+            operador="",
+            observacion=""
+        )
     )
 
     archivo_excel = convertir_excel(
