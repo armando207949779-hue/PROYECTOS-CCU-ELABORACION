@@ -1,6 +1,6 @@
 # =====================================================
 # 01_APP_CALCULADORA_UNIDADES.py
-# VERSION 3
+# VERSION 4
 # APP CALCULADORA DE MATERIAS PRIMAS POR UNIDADES
 # PROYECTO CCU - ELABORACIÓN
 # =====================================================
@@ -43,14 +43,12 @@ ARCHIVO_LOGO = RUTA_BASE / "CCU_LOGO.png"
 st.markdown(
     """
     <style>
-    /* Reducir espacio superior para que el logo no quede cortado */
     .block-container {
         padding-top: 1rem;
         padding-bottom: 2rem;
-        max-width: 980px;
+        max-width: 1040px;
     }
 
-    /* Ocultar elementos visuales innecesarios de Streamlit */
     header[data-testid="stHeader"] {
         background: rgba(0,0,0,0);
         height: 0rem;
@@ -138,6 +136,17 @@ st.markdown(
         margin-bottom: 18px;
     }
 
+    .mensaje-alerta {
+        background-color: #FFF8E1;
+        border-left: 5px solid #D6B656;
+        padding: 12px 14px;
+        border-radius: 8px;
+        color: #5F4B00;
+        font-size: 14px;
+        margin-top: 12px;
+        margin-bottom: 12px;
+    }
+
     .footer-app {
         text-align: center;
         color: #888888;
@@ -188,13 +197,13 @@ st.markdown(
 
 
 # =====================================================
-# FUNCIONES
+# FUNCIONES DE APOYO
 # =====================================================
 
 def mostrar_logo_centrado(ruta_logo: Path, ancho_px: int = 135) -> None:
     """
-    Muestra el logo centrado usando HTML/base64 para evitar problemas
-    de alineación y cortes con el encabezado de Streamlit.
+    Muestra el logo centrado usando HTML/base64.
+    Esto evita que quede desalineado o cortado por el encabezado de Streamlit.
     """
 
     if not ruta_logo.exists():
@@ -216,7 +225,7 @@ def mostrar_logo_centrado(ruta_logo: Path, ancho_px: int = 135) -> None:
 @st.cache_data
 def cargar_bbdd() -> pd.DataFrame:
     """
-    Carga la BBDD desde archivo Parquet.
+    Carga y limpia la BBDD Parquet.
     """
 
     if not ARCHIVO_BBDD.exists():
@@ -249,7 +258,7 @@ def cargar_bbdd() -> pd.DataFrame:
     df["Tipo de elaboración"] = df["Tipo de elaboración"].fillna("").astype(str).str.strip()
     df["Materia prima"] = df["Materia prima"].fillna("").astype(str).str.strip()
     df["Código"] = df["Código"].fillna("").astype(str).str.strip()
-    df["Unidad medida"] = df["Unidad medida"].fillna("").astype(str).str.strip()
+    df["Unidad medida"] = df["Unidad medida"].fillna("Sin unidad explícita").astype(str).str.strip()
 
     df["Cantidad por unidad"] = pd.to_numeric(
         df["Cantidad por unidad"],
@@ -283,24 +292,40 @@ def cargar_bbdd() -> pd.DataFrame:
     return df
 
 
-def generar_calculo(df_filtrado: pd.DataFrame, unidades: int) -> pd.DataFrame:
+def generar_calculo(df_bbdd: pd.DataFrame, tipo_elaboracion: str, unidades: int) -> pd.DataFrame:
     """
-    Calcula las materias primas requeridas.
+    Calcula materias primas requeridas para el tipo de elaboración seleccionado.
     """
 
-    df_resultado = df_filtrado.copy()
+    df_filtrado = df_bbdd[
+        df_bbdd["Tipo de elaboración"] == tipo_elaboracion
+    ].copy()
 
-    df_resultado["Número de unidades"] = unidades
-    df_resultado["Cantidad requerida"] = (
-        df_resultado["Cantidad por unidad"] * unidades
+    df_filtrado = df_filtrado.sort_values("Materia prima").reset_index(drop=True)
+
+    df_filtrado["Número de unidades"] = unidades
+    df_filtrado["Cantidad requerida"] = (
+        df_filtrado["Cantidad por unidad"] * unidades
     )
 
-    return df_resultado
+    df_filtrado = df_filtrado[
+        [
+            "Tipo de elaboración",
+            "Materia prima",
+            "Código",
+            "Cantidad por unidad",
+            "Cantidad requerida",
+            "Unidad medida",
+            "Número de unidades"
+        ]
+    ].copy()
+
+    return df_filtrado
 
 
 def tabla_resultado_simple(df_resultado: pd.DataFrame) -> pd.DataFrame:
     """
-    Tabla simple para mostrar al usuario.
+    Tabla principal simple para el usuario.
     """
 
     df_simple = df_resultado[
@@ -319,7 +344,7 @@ def tabla_resultado_simple(df_resultado: pd.DataFrame) -> pd.DataFrame:
 
 def tabla_detalle_unitario(df_resultado: pd.DataFrame) -> pd.DataFrame:
     """
-    Tabla de detalle unitario para mostrar colapsada.
+    Tabla de detalle unitario, colapsada por defecto.
     """
 
     df_detalle = df_resultado[
@@ -339,11 +364,102 @@ def tabla_detalle_unitario(df_resultado: pd.DataFrame) -> pd.DataFrame:
     return df_detalle
 
 
-def convertir_excel(df_resultado: pd.DataFrame, tipo_elaboracion: str, fecha_calculo: date, unidades: int) -> BytesIO:
+def crear_base_fichas(df_resultado: pd.DataFrame) -> pd.DataFrame:
     """
-    Convierte resultado a Excel descargable.
-    Hoja 1: Resultado simple.
-    Hoja 2: Detalle unitario.
+    Crea una tabla editable para levantar fichas técnicas.
+    Es una versión más amigable que crear un formulario individual por materia prima.
+    """
+
+    df_fichas = df_resultado[
+        [
+            "Materia prima",
+            "Código",
+            "Unidad medida"
+        ]
+    ].copy()
+
+    df_fichas["Proveedor"] = ""
+    df_fichas["Lote"] = ""
+    df_fichas["Fecha Elaboración"] = ""
+    df_fichas["Fecha Vencimiento"] = ""
+    df_fichas["N° Bolsas / Bidones"] = ""
+    df_fichas["Inspección visual"] = "Cumple"
+
+    return df_fichas
+
+
+def generar_registro_una_fila(
+    df_resultado: pd.DataFrame,
+    df_fichas: pd.DataFrame,
+    fecha_calculo: date,
+    orden_elaboracion: str,
+    tipo_elaboracion: str,
+    unidades: int,
+    destino: str,
+    turno: str,
+    operador: str,
+    observacion: str
+) -> pd.DataFrame:
+    """
+    Genera un registro completo en una sola fila:
+    datos generales + cálculo + fichas técnicas.
+    """
+
+    fila_registro = {
+        "Fecha": fecha_calculo.strftime("%d-%m-%Y") if fecha_calculo else "",
+        "Orden elaboración": orden_elaboracion,
+        "Tipo de elaboración": tipo_elaboracion,
+        "Unidades": unidades,
+        "Destino": destino,
+        "Turno": turno,
+        "Operador": operador,
+        "Observación": observacion
+    }
+
+    # Materias primas calculadas
+    for _, row in df_resultado.iterrows():
+        materia = str(row["Materia prima"]).strip()
+        codigo = str(row["Código"]).strip()
+        unidad_medida = str(row["Unidad medida"]).strip()
+
+        nombre_base = f"{materia} ({codigo})" if codigo != "" else materia
+
+        fila_registro[f"{nombre_base} Unidad medida"] = unidad_medida
+        fila_registro[f"{nombre_base} Cantidad por unidad"] = row["Cantidad por unidad"]
+        fila_registro[f"{nombre_base} Cantidad calculada"] = row["Cantidad requerida"]
+
+    # Fichas técnicas
+    if df_fichas is not None and len(df_fichas) > 0:
+        for _, row in df_fichas.iterrows():
+            materia = str(row.get("Materia prima", "")).strip()
+            codigo = str(row.get("Código", "")).strip()
+
+            nombre_base = f"{materia} ({codigo})" if codigo != "" else materia
+
+            fila_registro[f"{nombre_base} Proveedor"] = row.get("Proveedor", "")
+            fila_registro[f"{nombre_base} Lote"] = row.get("Lote", "")
+            fila_registro[f"{nombre_base} Fecha Elaboración"] = row.get("Fecha Elaboración", "")
+            fila_registro[f"{nombre_base} Fecha Vencimiento"] = row.get("Fecha Vencimiento", "")
+            fila_registro[f"{nombre_base} N° Bolsas / Bidones"] = row.get("N° Bolsas / Bidones", "")
+            fila_registro[f"{nombre_base} Inspección visual"] = row.get("Inspección visual", "")
+
+    return pd.DataFrame([fila_registro])
+
+
+def convertir_excel(
+    df_resultado: pd.DataFrame,
+    df_fichas: pd.DataFrame,
+    df_registro: pd.DataFrame,
+    tipo_elaboracion: str,
+    fecha_calculo: date,
+    unidades: int
+) -> BytesIO:
+    """
+    Genera Excel descargable con:
+    - Resultado simple
+    - Detalle unitario
+    - Fichas técnicas
+    - Registro completo
     """
 
     output = BytesIO()
@@ -354,6 +470,12 @@ def convertir_excel(df_resultado: pd.DataFrame, tipo_elaboracion: str, fecha_cal
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_simple.to_excel(writer, index=False, sheet_name="Resultado")
         df_detalle.to_excel(writer, index=False, sheet_name="Detalle unitario")
+
+        if df_fichas is not None and len(df_fichas) > 0:
+            df_fichas.to_excel(writer, index=False, sheet_name="Fichas tecnicas")
+
+        if df_registro is not None and len(df_registro) > 0:
+            df_registro.to_excel(writer, index=False, sheet_name="Registro completo")
 
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -366,7 +488,7 @@ def convertir_excel(df_resultado: pd.DataFrame, tipo_elaboracion: str, fecha_cal
         thin = Side(style="thin", color="D9D9D9")
         border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-        for sheet_name in ["Resultado", "Detalle unitario"]:
+        for sheet_name in writer.sheets:
             worksheet = writer.sheets[sheet_name]
 
             worksheet.insert_rows(1, 4)
@@ -383,7 +505,7 @@ def convertir_excel(df_resultado: pd.DataFrame, tipo_elaboracion: str, fecha_cal
                     cell = worksheet.cell(row=row, column=col)
                     cell.fill = fill_info
                     cell.font = font_info
-                    cell.alignment = Alignment(vertical="center")
+                    cell.alignment = Alignment(vertical="center", wrap_text=True)
 
             for cell in worksheet[5]:
                 cell.fill = fill_header
@@ -407,7 +529,7 @@ def convertir_excel(df_resultado: pd.DataFrame, tipo_elaboracion: str, fecha_cal
                     value = "" if cell.value is None else str(cell.value)
                     max_len = max(max_len, len(value))
 
-                worksheet.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 42)
+                worksheet.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 45)
 
     output.seek(0)
     return output
@@ -463,13 +585,12 @@ st.markdown(
 
 
 # =====================================================
-# FORMULARIO
+# FORMULARIO PRINCIPAL
 # =====================================================
 
 st.markdown('<div class="seccion">Datos del cálculo</div>', unsafe_allow_html=True)
 
 with st.form("form_calculo"):
-
     fecha_calculo = st.date_input(
         "Fecha",
         value=date.today()
@@ -494,17 +615,24 @@ with st.form("form_calculo"):
 
 
 # =====================================================
-# RESULTADO
+# CÁLCULO
 # =====================================================
 
 if calcular:
+    st.session_state["calculo_generado"] = True
+    st.session_state["fecha_calculo"] = fecha_calculo
+    st.session_state["tipo_seleccionado"] = tipo_seleccionado
+    st.session_state["unidades"] = unidades
 
-    df_filtrado = df_bbdd[
-        df_bbdd["Tipo de elaboración"] == tipo_seleccionado
-    ].copy()
+if st.session_state.get("calculo_generado", False):
+
+    fecha_calculo = st.session_state["fecha_calculo"]
+    tipo_seleccionado = st.session_state["tipo_seleccionado"]
+    unidades = st.session_state["unidades"]
 
     df_resultado = generar_calculo(
-        df_filtrado=df_filtrado,
+        df_bbdd=df_bbdd,
+        tipo_elaboracion=tipo_seleccionado,
         unidades=unidades
     )
 
@@ -535,8 +663,116 @@ if calcular:
             hide_index=True
         )
 
+    # =================================================
+    # REGISTRO OPCIONAL
+    # =================================================
+
+    with st.expander("Completar registro opcional", expanded=False):
+        st.markdown(
+            """
+            <div class="mensaje-alerta">
+                Esta sección es opcional. Sirve para guardar datos generales y fichas técnicas
+                junto con el cálculo.
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            orden_elaboracion = st.text_input(
+                "Orden elaboración",
+                placeholder="Ej: 7100059000"
+            )
+
+            destino = st.selectbox(
+                "Destino",
+                options=[
+                    "SALA DE JARABES 1",
+                    "SALA DE JARABES 2",
+                    "SALA BAG IN BOX (BIB)"
+                ],
+                index=0
+            )
+
+        with col2:
+            turno = st.selectbox(
+                "Turno",
+                options=["A", "B", "C"],
+                index=0
+            )
+
+            operador = st.text_input(
+                "Operador",
+                placeholder="Ej: R. Toledo"
+            )
+
+        observacion = st.text_area(
+            "Observación",
+            placeholder="Observación del registro",
+            height=80
+        )
+
+        st.markdown('<div class="seccion">Fichas técnicas</div>', unsafe_allow_html=True)
+
+        df_fichas_base = crear_base_fichas(df_resultado)
+
+        df_fichas = st.data_editor(
+            df_fichas_base,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            column_config={
+                "Inspección visual": st.column_config.SelectboxColumn(
+                    "Inspección visual",
+                    options=["Cumple", "No cumple"],
+                    required=False
+                )
+            },
+            key="editor_fichas"
+        )
+
+        df_registro = generar_registro_una_fila(
+            df_resultado=df_resultado,
+            df_fichas=df_fichas,
+            fecha_calculo=fecha_calculo,
+            orden_elaboracion=orden_elaboracion,
+            tipo_elaboracion=tipo_seleccionado,
+            unidades=unidades,
+            destino=destino,
+            turno=turno,
+            operador=operador,
+            observacion=observacion
+        )
+
+        with st.expander("Ver registro completo en una fila", expanded=False):
+            st.dataframe(
+                df_registro,
+                use_container_width=True,
+                hide_index=True
+            )
+
+    # Si no se completó la sección opcional, se descarga igual con fichas base vacías
+    df_fichas_descarga = crear_base_fichas(df_resultado)
+
+    df_registro_descarga = generar_registro_una_fila(
+        df_resultado=df_resultado,
+        df_fichas=df_fichas_descarga,
+        fecha_calculo=fecha_calculo,
+        orden_elaboracion="",
+        tipo_elaboracion=tipo_seleccionado,
+        unidades=unidades,
+        destino="",
+        turno="",
+        operador="",
+        observacion=""
+    )
+
     archivo_excel = convertir_excel(
         df_resultado=df_resultado,
+        df_fichas=df_fichas_descarga,
+        df_registro=df_registro_descarga,
         tipo_elaboracion=tipo_seleccionado,
         fecha_calculo=fecha_calculo,
         unidades=unidades
@@ -561,7 +797,8 @@ else:
     st.markdown(
         """
         <div class="mensaje-info">
-            Selecciona la fecha, el tipo de elaboración y el número de unidades. Luego presiona <b>Calcular materias primas</b>.
+            Selecciona la fecha, el tipo de elaboración y el número de unidades.
+            Luego presiona <b>Calcular materias primas</b>.
         </div>
         """,
         unsafe_allow_html=True
