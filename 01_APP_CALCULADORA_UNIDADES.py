@@ -1,6 +1,6 @@
 # =====================================================
 # 01_APP_CALCULADORA_UNIDADES.py
-# VERSION 5
+# VERSION 6
 # APP CALCULADORA DE MATERIAS PRIMAS POR UNIDADES
 # PROYECTO CCU - ELABORACIÓN
 # =====================================================
@@ -45,9 +45,9 @@ st.markdown(
     """
     <style>
     .block-container {
-        padding-top: 1.2rem;
+        padding-top: 1.0rem;
         padding-bottom: 2rem;
-        max-width: 1280px;
+        max-width: 1320px;
     }
 
     header[data-testid="stHeader"] {
@@ -55,24 +55,12 @@ st.markdown(
         height: 0rem;
     }
 
-    div[data-testid="stToolbar"] {
-        visibility: hidden;
-        height: 0%;
-        position: fixed;
-    }
-
-    div[data-testid="stDecoration"] {
-        visibility: hidden;
-        height: 0%;
-        position: fixed;
-    }
-
-    #MainMenu {
-        visibility: hidden;
-    }
-
+    div[data-testid="stToolbar"],
+    div[data-testid="stDecoration"],
+    #MainMenu,
     footer {
         visibility: hidden;
+        height: 0%;
     }
 
     .logo-container {
@@ -80,12 +68,12 @@ st.markdown(
         justify-content: center;
         align-items: center;
         margin-top: 0px;
-        margin-bottom: 8px;
+        margin-bottom: 6px;
         width: 100%;
     }
 
     .logo-container img {
-        max-width: 120px;
+        max-width: 112px;
         height: auto;
         display: block;
     }
@@ -104,23 +92,31 @@ st.markdown(
         text-align: center;
         font-size: 15px;
         color: #666666;
-        margin-bottom: 22px;
+        margin-bottom: 20px;
     }
 
     .card {
         background-color: #FFFFFF;
         border: 1px solid #E1E4E8;
         border-radius: 12px;
-        padding: 18px 18px 10px 18px;
+        padding: 18px;
         margin-bottom: 14px;
         box-shadow: 0px 1px 2px rgba(0,0,0,0.04);
+    }
+
+    .card-important {
+        background-color: #FFF8E6;
+        border: 1px solid #D6B656;
+        border-radius: 12px;
+        padding: 18px;
+        margin-bottom: 14px;
     }
 
     .seccion {
         font-size: 19px;
         font-weight: 800;
         color: #003865;
-        margin-top: 4px;
+        margin-top: 0px;
         margin-bottom: 12px;
     }
 
@@ -153,7 +149,7 @@ st.markdown(
         border-radius: 8px;
         color: #5F4B00;
         font-size: 14px;
-        margin-top: 12px;
+        margin-top: 10px;
         margin-bottom: 12px;
     }
 
@@ -161,7 +157,7 @@ st.markdown(
         text-align: center;
         color: #888888;
         font-size: 12px;
-        margin-top: 36px;
+        margin-top: 34px;
     }
 
     div.stButton > button:first-child {
@@ -207,10 +203,10 @@ st.markdown(
 
 
 # =====================================================
-# FUNCIONES DE APOYO
+# FUNCIONES DE LIMPIEZA
 # =====================================================
 
-def mostrar_logo_centrado(ruta_logo: Path, ancho_px: int = 120) -> None:
+def mostrar_logo_centrado(ruta_logo: Path, ancho_px: int = 112) -> None:
     """
     Muestra el logo centrado usando HTML/base64.
     """
@@ -249,84 +245,153 @@ def limpiar_texto(valor) -> str:
     return texto
 
 
-def extraer_codigo_desde_texto(texto: str) -> str:
+def formatear_cantidad(valor, max_decimales: int = 4) -> str:
     """
-    Extrae un código probable desde la materia prima cuando la columna Código viene vacía
-    o cuando el código quedó mezclado dentro del nombre.
-
-    Prioridad:
-    1. Código tipo E + números, ejemplo E56685, E100704.
-    2. Código con asteriscos, ejemplo 35009*60*01A.
-    3. Código alfanumérico entre paréntesis, ejemplo 17B71ASK.
+    Formatea cantidades cuidando cifras significativas:
+    - No muestra ceros innecesarios.
+    - Máximo 4 decimales por defecto.
+    - Mantiene decimales cuando realmente aportan información.
     """
 
-    texto = limpiar_texto(texto)
+    try:
+        numero = float(valor)
+    except Exception:
+        return ""
+
+    if pd.isna(numero):
+        return ""
+
+    texto = f"{numero:,.{max_decimales}f}"
+    texto = texto.rstrip("0").rstrip(".")
+
+    if texto == "-0":
+        texto = "0"
+
+    return texto
+
+
+def extraer_codigo_candidato(materia_original: str) -> str:
+    """
+    Extrae el código de producto desde el nombre original de la materia prima.
+
+    Se priorizan códigos propios de producto como:
+    - 17B71ASK
+    - 17286ASP
+    - 17174MSB
+    - 35009*60*01A
+    - 35009*80*33Av02
+
+    Se evitan códigos logísticos como:
+    - E56685
+    - 2000304212
+    - F0000014161
+    """
+
+    texto = limpiar_texto(materia_original)
 
     if texto == "":
         return ""
 
-    # Código tipo E56685 / E100704 / E30670
-    match_e = re.search(r"\bE\d{4,}\b", texto, flags=re.IGNORECASE)
-    if match_e:
-        return match_e.group(0).upper()
+    # Candidatos dentro de paréntesis
+    parentesis = re.findall(r"\(([^)]{3,80})\)", texto)
 
-    # Código con asteriscos
-    match_ast = re.search(r"\b\d{3,}\*\d+[A-Z0-9*]*\b", texto, flags=re.IGNORECASE)
+    for item in parentesis:
+        candidato = limpiar_texto(item)
+
+        # Saltar paréntesis que parecen descripción de unidad o contienen código logístico E
+        if re.search(r"\bKg\b|\bL\b|unidad|unid", candidato, flags=re.IGNORECASE):
+            continue
+
+        if re.search(r"\bE\d{4,}\b", candidato, flags=re.IGNORECASE):
+            continue
+
+        if re.search(r"\bF\d{5,}\b", candidato, flags=re.IGNORECASE):
+            continue
+
+        if re.search(r"\b20\d{8,}\b", candidato):
+            continue
+
+        # Aceptar códigos con asterisco
+        if re.search(r"\d+\*\d+", candidato):
+            return candidato.upper()
+
+        # Aceptar código alfanumérico compacto, ejemplo 17B71ASK
+        if re.fullmatch(r"[A-Z0-9][A-Z0-9*\-/.]{3,30}", candidato, flags=re.IGNORECASE):
+            return candidato.upper()
+
+    # Códigos con asterisco fuera de paréntesis, normalmente al final del nombre
+    match_ast = re.search(r"\b\d{3,}\*\d+(?:\*\d+)?[A-Z0-9]*\b", texto, flags=re.IGNORECASE)
     if match_ast:
         return match_ast.group(0).upper()
-
-    # Primer texto entre paréntesis si parece código alfanumérico
-    parentesis = re.findall(r"\(([^)]{3,40})\)", texto)
-    for item in parentesis:
-        item = item.strip()
-        if re.fullmatch(r"[A-Z0-9*\-/.]+", item, flags=re.IGNORECASE):
-            return item.upper()
 
     return ""
 
 
-def normalizar_codigo(codigo, materia_prima: str) -> str:
+def es_codigo_logistico(codigo: str) -> bool:
     """
-    Normaliza la columna Código.
-    Si viene vacía, intenta extraerla desde la materia prima.
+    Identifica códigos logísticos que no conviene mostrar como código principal.
     """
 
     codigo = limpiar_texto(codigo)
-    materia_prima = limpiar_texto(materia_prima)
 
-    if codigo != "":
-        return codigo
+    if codigo == "":
+        return False
 
-    return extraer_codigo_desde_texto(materia_prima)
+    if re.fullmatch(r"20\d{8,}\s*(SA|LF)?", codigo, flags=re.IGNORECASE):
+        return True
+
+    if re.fullmatch(r"F\d{5,}", codigo, flags=re.IGNORECASE):
+        return True
+
+    if re.search(r"\b20\d{8,}\b", codigo) and len(codigo) > 8:
+        return True
+
+    return False
 
 
-def limpiar_nombre_materia_prima(materia_prima: str) -> str:
+def normalizar_codigo(codigo_original, materia_original: str) -> str:
+    """
+    Normaliza la columna Código.
+    Si el código original viene vacío o parece logístico, usa el código candidato desde la materia prima.
+    """
+
+    codigo = limpiar_texto(codigo_original)
+    candidato = extraer_codigo_candidato(materia_original)
+
+    if candidato != "":
+        if codigo == "" or es_codigo_logistico(codigo):
+            return candidato
+
+    return codigo
+
+
+def limpiar_nombre_materia_prima(materia_original: str) -> str:
     """
     Limpia el nombre visible de la materia prima.
 
-    En algunas bases el nombre viene así:
+    Ejemplo:
     Acesulfamo de Potasio (17B71ASK) (E56685 2000304212 SA F0000014161)
-
-    Esta función lo deja más limpio:
-    Acesulfamo de Potasio
+    -> Acesulfamo de Potasio
     """
 
-    texto = limpiar_texto(materia_prima)
+    texto = limpiar_texto(materia_original)
 
     if texto == "":
         return ""
 
-    # Quitar todos los paréntesis y su contenido
+    # Quitar contenido entre paréntesis
     texto = re.sub(r"\([^)]*\)", "", texto)
 
-    # Quitar códigos técnicos frecuentes que quedan fuera de paréntesis
+    # Quitar códigos logísticos
     texto = re.sub(r"\bE\d{4,}\b", "", texto, flags=re.IGNORECASE)
     texto = re.sub(r"\bF\d{5,}\b", "", texto, flags=re.IGNORECASE)
     texto = re.sub(r"\b20\d{8,}\b", "", texto)
     texto = re.sub(r"\bSA\b", "", texto, flags=re.IGNORECASE)
     texto = re.sub(r"\bLF\b", "", texto, flags=re.IGNORECASE)
 
-    # Limpieza final
+    # Quitar códigos con asterisco que queden al final del nombre
+    texto = re.sub(r"\b\d{3,}\*\d+(?:\*\d+)?[A-Z0-9]*\b\s*$", "", texto, flags=re.IGNORECASE)
+
     texto = re.sub(r"\s+", " ", texto).strip(" -_/.")
 
     return texto
@@ -360,7 +425,7 @@ def nombre_archivo_seguro(texto: str) -> str:
 
 
 # =====================================================
-# CARGA Y NORMALIZACIÓN DE BBDD
+# CARGA DE BBDD
 # =====================================================
 
 @st.cache_data
@@ -399,7 +464,6 @@ def cargar_bbdd() -> pd.DataFrame:
     df["Tipo de elaboración"] = df["Tipo de elaboración"].apply(limpiar_texto)
     df["Materia prima original"] = df["Materia prima"].apply(limpiar_texto)
 
-    # Primero normalizamos código usando la materia original
     df["Código"] = df.apply(
         lambda row: normalizar_codigo(
             row["Código"],
@@ -408,7 +472,6 @@ def cargar_bbdd() -> pd.DataFrame:
         axis=1
     )
 
-    # Luego limpiamos nombre de materia prima visible
     df["Materia prima"] = df["Materia prima original"].apply(limpiar_nombre_materia_prima)
 
     df["Unidad medida"] = (
@@ -444,7 +507,7 @@ def cargar_bbdd() -> pd.DataFrame:
         (df["Materia prima"] != "")
     ].copy()
 
-    # Si una misma materia prima y código se repite dentro de la elaboración, se consolida
+    # Consolidar si existen duplicados exactos luego de limpiar nombres/códigos
     df = (
         df
         .groupby(
@@ -528,14 +591,16 @@ def tabla_resultado_simple(df_resultado: pd.DataFrame) -> pd.DataFrame:
         ]
     ].copy()
 
-    df_simple["Cantidad requerida"] = df_simple["Cantidad requerida"].round(6)
+    df_simple["Cantidad requerida"] = df_simple["Cantidad requerida"].apply(
+        lambda x: formatear_cantidad(x, max_decimales=4)
+    )
 
     return df_simple
 
 
 def tabla_detalle_unitario(df_resultado: pd.DataFrame) -> pd.DataFrame:
     """
-    Tabla de detalle unitario colapsada.
+    Tabla de detalle unitario.
     """
 
     df_detalle = df_resultado[
@@ -549,15 +614,20 @@ def tabla_detalle_unitario(df_resultado: pd.DataFrame) -> pd.DataFrame:
         ]
     ].copy()
 
-    df_detalle["Cantidad por unidad"] = df_detalle["Cantidad por unidad"].round(6)
-    df_detalle["Cantidad requerida"] = df_detalle["Cantidad requerida"].round(6)
+    df_detalle["Cantidad por unidad"] = df_detalle["Cantidad por unidad"].apply(
+        lambda x: formatear_cantidad(x, max_decimales=6)
+    )
+
+    df_detalle["Cantidad requerida"] = df_detalle["Cantidad requerida"].apply(
+        lambda x: formatear_cantidad(x, max_decimales=4)
+    )
 
     return df_detalle
 
 
 def crear_base_fichas(df_resultado: pd.DataFrame) -> pd.DataFrame:
     """
-    Crea una tabla editable para fichas técnicas.
+    Crea una tabla editable para fichas técnicas de materias primas.
     """
 
     df_fichas = df_resultado[
@@ -591,8 +661,7 @@ def generar_registro_una_fila(
     observacion: str
 ) -> pd.DataFrame:
     """
-    Genera registro completo en una sola fila:
-    datos generales + cálculo + fichas técnicas.
+    Genera registro completo en una sola fila.
     """
 
     fila_registro = {
@@ -656,8 +725,25 @@ def convertir_excel(
 
     output = BytesIO()
 
-    df_simple = tabla_resultado_simple(df_resultado)
-    df_detalle = tabla_detalle_unitario(df_resultado)
+    df_simple = df_resultado[
+        [
+            "Materia prima",
+            "Código",
+            "Cantidad requerida",
+            "Unidad medida"
+        ]
+    ].copy()
+
+    df_detalle = df_resultado[
+        [
+            "Materia prima",
+            "Código",
+            "Cantidad por unidad",
+            "Número de unidades",
+            "Cantidad requerida",
+            "Unidad medida"
+        ]
+    ].copy()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_simple.to_excel(writer, index=False, sheet_name="Resultado")
@@ -710,6 +796,9 @@ def convertir_excel(
                     cell.border = border
                     cell.alignment = Alignment(vertical="top", wrap_text=True)
 
+                    if isinstance(cell.value, (int, float)):
+                        cell.number_format = "#,##0.####"
+
             worksheet.freeze_panes = "A6"
             worksheet.auto_filter.ref = worksheet.dimensions
 
@@ -738,12 +827,12 @@ df_bbdd = cargar_bbdd()
 # ENCABEZADO
 # =====================================================
 
-mostrar_logo_centrado(ARCHIVO_LOGO, ancho_px=120)
+mostrar_logo_centrado(ARCHIVO_LOGO, ancho_px=112)
 
 st.markdown(
     """
-    <div class="titulo-principal">Calculadora de Materias Primas</div>
-    <div class="subtitulo">Proyecto CCU - Elaboración</div>
+    <div class="titulo-principal">Registro de elaboración - Sala de unidades</div>
+    <div class="subtitulo">Calculadora de materias primas | Proyecto CCU - Elaboración</div>
     """,
     unsafe_allow_html=True
 )
@@ -753,19 +842,14 @@ st.markdown(
 # FORMULARIO PRINCIPAL
 # =====================================================
 
-st.markdown('<div class="card">', unsafe_allow_html=True)
-st.markdown('<div class="seccion">Datos generales</div>', unsafe_allow_html=True)
+st.markdown('<div class="card-important">', unsafe_allow_html=True)
+st.markdown('<div class="seccion">Inputs importantes</div>', unsafe_allow_html=True)
 
 with st.form("form_calculo"):
-    col1, col2, col3 = st.columns([1.2, 2.2, 1.1])
 
-    with col1:
-        fecha_calculo = st.date_input(
-            "Fecha",
-            value=date.today()
-        )
+    col_a, col_b = st.columns([2.5, 1])
 
-    with col2:
+    with col_a:
         tipos_elaboracion = sorted(df_bbdd["Tipo de elaboración"].unique())
 
         tipo_seleccionado = st.selectbox(
@@ -774,15 +858,63 @@ with st.form("form_calculo"):
             index=0
         )
 
-    with col3:
+    with col_b:
         unidades = st.number_input(
-            "Número de unidades",
+            "Unidades",
             min_value=1,
             value=1,
             step=1
         )
 
-    calcular = st.form_submit_button("Calcular materias primas")
+    st.markdown('<div class="seccion">Datos generales</div>', unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1.1, 1.4, 1.6])
+
+    with col1:
+        fecha_calculo = st.date_input(
+            "Fecha",
+            value=date.today()
+        )
+
+    with col2:
+        orden_elaboracion = st.text_input(
+            "Orden",
+            placeholder="Ej: 7100059000"
+        )
+
+    with col3:
+        destino = st.selectbox(
+            "Destino",
+            options=[
+                "SALA DE JARABES 1",
+                "SALA DE JARABES 2",
+                "SALA BAG IN BOX (BIB)"
+            ],
+            index=0
+        )
+
+    col4, col5, col6 = st.columns([0.8, 1.4, 2.2])
+
+    with col4:
+        turno = st.selectbox(
+            "Turno",
+            options=["A", "B", "C"],
+            index=0
+        )
+
+    with col5:
+        operador = st.text_input(
+            "Operador",
+            placeholder="Ej: R. Toledo"
+        )
+
+    with col6:
+        observacion = st.text_input(
+            "Observación",
+            placeholder="Observación del registro"
+        )
+
+    calcular = st.form_submit_button("Mostrar registro")
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -796,12 +928,24 @@ if calcular:
     st.session_state["fecha_calculo"] = fecha_calculo
     st.session_state["tipo_seleccionado"] = tipo_seleccionado
     st.session_state["unidades"] = unidades
+    st.session_state["orden_elaboracion"] = orden_elaboracion
+    st.session_state["destino"] = destino
+    st.session_state["turno"] = turno
+    st.session_state["operador"] = operador
+    st.session_state["observacion"] = observacion
+    st.session_state.pop("df_fichas", None)
+    st.session_state.pop("df_registro", None)
 
 if st.session_state.get("calculo_generado", False):
 
     fecha_calculo = st.session_state["fecha_calculo"]
     tipo_seleccionado = st.session_state["tipo_seleccionado"]
     unidades = st.session_state["unidades"]
+    orden_elaboracion = st.session_state["orden_elaboracion"]
+    destino = st.session_state["destino"]
+    turno = st.session_state["turno"]
+    operador = st.session_state["operador"]
+    observacion = st.session_state["observacion"]
 
     df_resultado = generar_calculo(
         df_bbdd=df_bbdd,
@@ -815,10 +959,10 @@ if st.session_state.get("calculo_generado", False):
     st.markdown(
         f"""
         <div class="mensaje-ok">
-            Registro de prueba generado correctamente.<br>
-            <b>Elaboración:</b> {tipo_seleccionado}<br>
-            <b>Unidades solicitadas:</b> {unidades}<br>
-            <b>Materias primas requeridas:</b> {len(df_simple)}
+            <b>Registro de prueba generado correctamente.</b><br>
+            Elaboración seleccionada: <b>{tipo_seleccionado}</b><br>
+            Unidades solicitadas: <b>{unidades}</b><br>
+            Materias primas requeridas: <b>{len(df_simple)}</b>
         </div>
         """,
         unsafe_allow_html=True
@@ -840,9 +984,9 @@ if st.session_state.get("calculo_generado", False):
                 "Código",
                 width="medium"
             ),
-            "Cantidad requerida": st.column_config.NumberColumn(
+            "Cantidad requerida": st.column_config.TextColumn(
                 "Cantidad requerida",
-                format="%.6f"
+                width="medium"
             ),
             "Unidad medida": st.column_config.TextColumn(
                 "Unidad medida",
@@ -855,168 +999,118 @@ if st.session_state.get("calculo_generado", False):
         st.dataframe(
             df_detalle,
             use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Cantidad por unidad": st.column_config.NumberColumn(
-                    "Cantidad por unidad",
-                    format="%.6f"
-                ),
-                "Cantidad requerida": st.column_config.NumberColumn(
-                    "Cantidad requerida",
-                    format="%.6f"
-                )
-            }
+            hide_index=True
         )
 
     st.markdown('</div>', unsafe_allow_html=True)
 
     # =================================================
-    # DATOS DE REGISTRO, SIMILAR A LA INTERFAZ ORIGINAL
+    # FICHAS TÉCNICAS
     # =================================================
 
-    with st.expander("Completar datos de registro y fichas técnicas", expanded=False):
-        st.markdown(
-            """
-            <div class="mensaje-alerta">
-                Esta sección permite registrar información adicional del proceso:
-                orden de elaboración, destino, turno, operador y fichas técnicas por materia prima.
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="seccion">Ficha técnica de materias primas</div>', unsafe_allow_html=True)
 
-        st.markdown('<div class="seccion">Datos del registro</div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="mensaje-alerta">
+            Completa proveedor, lote, fechas, número de bolsas o bidones e inspección visual para cada materia prima.
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-        col1, col2, col3 = st.columns([1.4, 1.6, 1])
+    df_fichas_base = crear_base_fichas(df_resultado)
 
-        with col1:
-            orden_elaboracion = st.text_input(
-                "Orden elaboración",
-                placeholder="Ej: 7100059000"
+    df_fichas = st.data_editor(
+        df_fichas_base,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        column_config={
+            "Materia prima": st.column_config.TextColumn(
+                "Materia prima",
+                disabled=True,
+                width="large"
+            ),
+            "Código": st.column_config.TextColumn(
+                "Código",
+                disabled=True,
+                width="medium"
+            ),
+            "Unidad medida": st.column_config.TextColumn(
+                "Unidad medida",
+                disabled=True,
+                width="small"
+            ),
+            "Proveedor": st.column_config.TextColumn(
+                "Proveedor",
+                width="medium"
+            ),
+            "Lote": st.column_config.TextColumn(
+                "Lote",
+                width="medium"
+            ),
+            "Fecha Elaboración": st.column_config.TextColumn(
+                "Fecha Elaboración",
+                help="Formato sugerido: dd-mm-aaaa"
+            ),
+            "Fecha Vencimiento": st.column_config.TextColumn(
+                "Fecha Vencimiento",
+                help="Formato sugerido: dd-mm-aaaa"
+            ),
+            "N° Bolsas / Bidones": st.column_config.TextColumn(
+                "N° Bolsas / Bidones"
+            ),
+            "Inspección visual": st.column_config.SelectboxColumn(
+                "Inspección visual",
+                options=["Cumple", "No cumple"],
+                required=False
             )
+        },
+        key="editor_fichas"
+    )
 
-        with col2:
-            destino = st.selectbox(
-                "Destino",
-                options=[
-                    "SALA DE JARABES 1",
-                    "SALA DE JARABES 2",
-                    "SALA BAG IN BOX (BIB)"
-                ],
-                index=0
-            )
+    df_registro = generar_registro_una_fila(
+        df_resultado=df_resultado,
+        df_fichas=df_fichas,
+        fecha_calculo=fecha_calculo,
+        orden_elaboracion=orden_elaboracion,
+        tipo_elaboracion=tipo_seleccionado,
+        unidades=unidades,
+        destino=destino,
+        turno=turno,
+        operador=operador,
+        observacion=observacion
+    )
 
-        with col3:
-            turno = st.selectbox(
-                "Turno",
-                options=["A", "B", "C"],
-                index=0
-            )
+    st.session_state["df_fichas"] = df_fichas
+    st.session_state["df_registro"] = df_registro
 
-        col4, col5 = st.columns([1.4, 2.2])
-
-        with col4:
-            operador = st.text_input(
-                "Operador",
-                placeholder="Ej: R. Toledo"
-            )
-
-        with col5:
-            observacion = st.text_input(
-                "Observación",
-                placeholder="Observación general"
-            )
-
-        st.markdown('<div class="seccion">Fichas técnicas</div>', unsafe_allow_html=True)
-
-        df_fichas_base = crear_base_fichas(df_resultado)
-
-        df_fichas = st.data_editor(
-            df_fichas_base,
+    with st.expander("Ver registro completo en una fila", expanded=False):
+        st.dataframe(
+            df_registro,
             use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            column_config={
-                "Materia prima": st.column_config.TextColumn(
-                    "Materia prima",
-                    disabled=True,
-                    width="large"
-                ),
-                "Código": st.column_config.TextColumn(
-                    "Código",
-                    disabled=True,
-                    width="medium"
-                ),
-                "Unidad medida": st.column_config.TextColumn(
-                    "Unidad medida",
-                    disabled=True,
-                    width="small"
-                ),
-                "Inspección visual": st.column_config.SelectboxColumn(
-                    "Inspección visual",
-                    options=["Cumple", "No cumple"],
-                    required=False
-                )
-            },
-            key="editor_fichas"
+            hide_index=True
         )
 
-        df_registro = generar_registro_una_fila(
-            df_resultado=df_resultado,
-            df_fichas=df_fichas,
-            fecha_calculo=fecha_calculo,
-            orden_elaboracion=orden_elaboracion,
-            tipo_elaboracion=tipo_seleccionado,
-            unidades=unidades,
-            destino=destino,
-            turno=turno,
-            operador=operador,
-            observacion=observacion
-        )
-
-        with st.expander("Ver registro completo en una fila", expanded=False):
-            st.dataframe(
-                df_registro,
-                use_container_width=True,
-                hide_index=True
-            )
-
-        st.session_state["df_fichas"] = df_fichas
-        st.session_state["df_registro"] = df_registro
+    st.markdown('</div>', unsafe_allow_html=True)
 
     # =================================================
     # DESCARGA
     # =================================================
 
-    df_fichas_descarga = st.session_state.get("df_fichas", crear_base_fichas(df_resultado))
-
-    df_registro_descarga = st.session_state.get(
-        "df_registro",
-        generar_registro_una_fila(
-            df_resultado=df_resultado,
-            df_fichas=df_fichas_descarga,
-            fecha_calculo=fecha_calculo,
-            orden_elaboracion="",
-            tipo_elaboracion=tipo_seleccionado,
-            unidades=unidades,
-            destino="",
-            turno="",
-            operador="",
-            observacion=""
-        )
-    )
-
     archivo_excel = convertir_excel(
         df_resultado=df_resultado,
-        df_fichas=df_fichas_descarga,
-        df_registro=df_registro_descarga,
+        df_fichas=df_fichas,
+        df_registro=df_registro,
         tipo_elaboracion=tipo_seleccionado,
         fecha_calculo=fecha_calculo,
         unidades=unidades
     )
 
     nombre_descarga = (
-        "CALCULO_MP_"
+        "REGISTRO_SALA_UNIDADES_"
         + nombre_archivo_seguro(tipo_seleccionado)
         + "_"
         + fecha_calculo.strftime("%Y%m%d")
@@ -1024,7 +1118,7 @@ if st.session_state.get("calculo_generado", False):
     )
 
     st.download_button(
-        label="Descargar resultado en Excel",
+        label="Descargar registro en Excel",
         data=archivo_excel,
         file_name=nombre_descarga,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1034,8 +1128,7 @@ else:
     st.markdown(
         """
         <div class="mensaje-info">
-            Selecciona la fecha, el tipo de elaboración y el número de unidades.
-            Luego presiona <b>Calcular materias primas</b>.
+            Completa los datos generales y presiona <b>Mostrar registro</b>.
         </div>
         """,
         unsafe_allow_html=True
