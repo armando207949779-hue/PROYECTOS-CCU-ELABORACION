@@ -2,3 +2,5 @@ streamlit
 pandas
 openpyxl
 pyarrow
+google-api-python-client
+google-auth
