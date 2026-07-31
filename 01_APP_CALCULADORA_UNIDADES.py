@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 from datetime import date
+from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
