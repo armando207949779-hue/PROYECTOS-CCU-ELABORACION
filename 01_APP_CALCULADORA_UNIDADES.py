@@ -3,7 +3,6 @@ import hashlib
 import json
 import re
 from datetime import date
-from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -193,36 +192,6 @@ def enviar_a_google_sheets(payload: dict) -> dict:
     return resultado
 
 
-def crear_excel_horizontal(fecha, orden, unidades, destino, sabor, turno, df_resultado) -> BytesIO:
-    fila = {
-        "Fecha": fecha.strftime("%d-%m-%Y"),
-        "Orden elaboración": orden,
-        "Unidades": unidades,
-        "Destino": destino,
-        "Sabor": sabor,
-        "Turno": turno,
-    }
-    for _, mp in df_resultado.iterrows():
-        encabezado = f'{mp["Materia prima"]}\n({mp["Código"]}) ({mp["Unidad medida"]})'
-        fila[encabezado] = float(mp["Cantidad requerida"])
-
-    salida = BytesIO()
-    with pd.ExcelWriter(salida, engine="openpyxl") as writer:
-        pd.DataFrame([fila]).to_excel(writer, index=False, sheet_name="Elaboraciones")
-        hoja = writer.sheets["Elaboraciones"]
-        hoja.freeze_panes = "A2"
-        for celda in hoja[1]:
-            celda.alignment = celda.alignment.copy(wrap_text=True, horizontal="center", vertical="center")
-        for columna in hoja.columns:
-            letra = columna[0].column_letter
-            ancho = max(len(str(celda.value or "")) for celda in columna) + 2
-            hoja.column_dimensions[letra].width = min(max(ancho, 12), 36)
-        for fila_excel in hoja.iter_rows(min_row=2, min_col=7):
-            for celda in fila_excel:
-                celda.number_format = "0.000"
-    salida.seek(0)
-    return salida
-
 
 verificar_acceso()
 
@@ -264,7 +233,10 @@ with st.form("form_elaboracion", clear_on_submit=False):
         sabor = st.selectbox("Sabor / tipo de elaboración", options=sabores, index=indice_sabor)
         unidades = st.number_input("Número de unidades", min_value=1, value=int(st.session_state.get("unidades", 1)), step=1)
     with c3:
-        destino = st.text_input("Destino", value=st.session_state.get("destino", ""), placeholder="Ejemplo: Jarabe 1")
+        destinos = ["Jarabe 1", "Jarabe 2"]
+        destino_previo = st.session_state.get("destino", "Jarabe 1")
+        indice_destino = destinos.index(destino_previo) if destino_previo in destinos else 0
+        destino = st.selectbox("Destino", options=destinos, index=indice_destino)
         turnos = ["A", "B", "C"]
         turno_previo = st.session_state.get("turno", "A")
         turno = st.selectbox("Turno", options=turnos, index=turnos.index(turno_previo))
@@ -276,8 +248,6 @@ if calcular:
     errores = []
     if not limpiar_texto(orden):
         errores.append("Ingresa la orden de elaboración.")
-    if not limpiar_texto(destino):
-        errores.append("Ingresa el destino.")
     if errores:
         for error in errores:
             st.error(error)
@@ -318,17 +288,11 @@ if "df_resultado" in st.session_state:
     mostrar["Cantidad requerida"] = mostrar["Cantidad requerida"].map(lambda x: f"{float(x):.6f}".rstrip("0").rstrip("."))
     st.dataframe(mostrar, use_container_width=True, hide_index=True)
 
-    col_guardar, col_excel = st.columns(2)
-    with col_guardar:
-        guardar = st.button("Guardar registro en Google Sheets", type="primary")
-    with col_excel:
-        archivo = crear_excel_horizontal(fecha, orden, unidades, destino, sabor, turno, resultado)
-        st.download_button(
-            "Descargar registro en Excel",
-            data=archivo,
-            file_name=f"ELABORACION_{re.sub(r'[^A-Za-z0-9_-]+', '_', sabor)}_{fecha.strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+    guardar = st.button(
+        "Guardar registro en Google Sheets",
+        type="primary",
+        use_container_width=True,
+    )
 
     if guardar:
         try:
