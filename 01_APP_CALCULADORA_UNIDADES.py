@@ -1,15 +1,20 @@
 # =====================================================
 # 01_APP_CALCULADORA_UNIDADES.py
-# VERSION 7
-# SOLO CALCULADORA DE MATERIAS PRIMAS
+# VERSION 8
+# CALCULADORA Y REGISTRO DE TRAZABILIDAD
 # PROYECTO CCU - ELABORACIÓN
 # =====================================================
 
 import base64
+import hashlib
+import json
 import re
-from datetime import date
+import uuid
+from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import pandas as pd
 import streamlit as st
@@ -694,10 +699,212 @@ def convertir_excel(
     return output
 
 
+
 # =====================================================
-# CARGAR BBDD
+# ACCESO, SECRETS Y GOOGLE SHEETS
 # =====================================================
 
+def obtener_secret(ruta: tuple[str, ...], obligatorio: bool = True, defecto=""):
+    """Obtiene un valor de st.secrets usando una ruta segura."""
+    actual = st.secrets
+    try:
+        for clave in ruta:
+            actual = actual[clave]
+        return actual
+    except Exception:
+        if obligatorio:
+            st.error("Falta configurar el secreto: " + ".".join(ruta))
+            st.stop()
+        return defecto
+
+
+def verificar_acceso() -> None:
+    """Protege la aplicación con una clave almacenada en st.secrets."""
+    if st.session_state.get("acceso_autorizado", False):
+        return
+
+    mostrar_logo_centrado(ARCHIVO_LOGO, ancho_px=112)
+    st.markdown('<div class="titulo-principal">Acceso a la aplicación</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtitulo">Proyecto CCU - Elaboración</div>', unsafe_allow_html=True)
+
+    with st.form("form_acceso", clear_on_submit=False):
+        clave_ingresada = st.text_input("Clave de acceso", type="password")
+        ingresar = st.form_submit_button("Ingresar")
+
+    if ingresar:
+        clave_configurada = str(obtener_secret(("app", "clave_acceso")))
+        hash_ingresado = hashlib.sha256(clave_ingresada.encode("utf-8")).digest()
+        hash_configurado = hashlib.sha256(clave_configurada.encode("utf-8")).digest()
+
+        if hash_ingresado == hash_configurado:
+            st.session_state["acceso_autorizado"] = True
+            st.rerun()
+        else:
+            st.error("Clave incorrecta.")
+
+    st.stop()
+
+
+def valor_fecha_iso(valor) -> str:
+    """Convierte date, datetime o texto de fecha al formato ISO."""
+    if valor is None or pd.isna(valor):
+        return ""
+    if isinstance(valor, datetime):
+        return valor.date().isoformat()
+    if isinstance(valor, date):
+        return valor.isoformat()
+    fecha = pd.to_datetime(valor, errors="coerce", dayfirst=True)
+    return "" if pd.isna(fecha) else fecha.date().isoformat()
+
+
+def crear_tabla_registro(df_resultado: pd.DataFrame) -> pd.DataFrame:
+    """Crea la tabla editable de trazabilidad para las materias primas."""
+    df = df_resultado[[
+        "Materia prima", "Código", "Cantidad requerida", "Unidad medida"
+    ]].copy()
+    df["Proveedor"] = ""
+    df["Lote"] = ""
+    df["Fecha elaboración"] = pd.NaT
+    df["Fecha vencimiento"] = pd.NaT
+    df["N° bolsas / bidones"] = ""
+    df["N° bidón / bolsa"] = ""
+    df["Inspección visual"] = "Cumple"
+    df["Observación"] = ""
+    return df
+
+
+def validar_registro(orden: str, destino: str, operador: str, df: pd.DataFrame) -> list[str]:
+    """Valida encabezado, trazabilidad, fechas e inspección visual."""
+    errores: list[str] = []
+
+    if not orden.strip():
+        errores.append("Debe ingresar la orden de elaboración.")
+    if not destino.strip():
+        errores.append("Debe ingresar el destino.")
+    if not operador.strip():
+        errores.append("Debe ingresar el operador.")
+
+    obligatorias = [
+        "Proveedor", "Lote", "Fecha vencimiento",
+        "N° bolsas / bidones", "N° bidón / bolsa", "Inspección visual"
+    ]
+
+    for columna in obligatorias:
+        if columna not in df.columns:
+            errores.append(f"Falta la columna obligatoria: {columna}.")
+            continue
+        serie = df[columna]
+        vacios = serie.isna() | serie.astype(str).str.strip().str.lower().isin(["", "nat", "nan", "none"])
+        if vacios.any():
+            errores.append(f"Complete todos los valores de: {columna}.")
+
+    fechas_vencimiento = pd.to_datetime(df.get("Fecha vencimiento"), errors="coerce")
+    if fechas_vencimiento.isna().any():
+        errores.append("Existe una fecha de vencimiento inválida.")
+    elif (fechas_vencimiento.dt.date < date.today()).any():
+        errores.append("Existe al menos una materia prima vencida.")
+
+    fechas_elaboracion = pd.to_datetime(df.get("Fecha elaboración"), errors="coerce")
+    validas = fechas_elaboracion.notna() & fechas_vencimiento.notna()
+    if validas.any() and (fechas_elaboracion[validas] > fechas_vencimiento[validas]).any():
+        errores.append("Una fecha de elaboración es posterior a su vencimiento.")
+
+    inspeccion = df.get("Inspección visual", pd.Series(dtype=str)).astype(str).str.strip().str.lower()
+    if inspeccion.eq("no cumple").any():
+        errores.append("No se puede guardar con una inspección visual 'No cumple'.")
+
+    return list(dict.fromkeys(errores))
+
+
+def construir_payload(
+    fecha_calculo: date,
+    orden: str,
+    tipo_elaboracion: str,
+    unidades: int,
+    destino: str,
+    turno: str,
+    operador: str,
+    observacion_general: str,
+    df_registro: pd.DataFrame,
+) -> dict:
+    """Construye el JSON enviado al Apps Script."""
+    id_registro = str(uuid.uuid4())
+    detalle = []
+
+    for _, fila in df_registro.iterrows():
+        detalle.append({
+            "id_registro": id_registro,
+            "materia_prima": limpiar_texto(fila.get("Materia prima")),
+            "codigo": limpiar_texto(fila.get("Código")),
+            "cantidad_requerida": float(fila.get("Cantidad requerida", 0)),
+            "unidad_medida": limpiar_texto(fila.get("Unidad medida")),
+            "proveedor": limpiar_texto(fila.get("Proveedor")),
+            "lote": limpiar_texto(fila.get("Lote")),
+            "fecha_elaboracion": valor_fecha_iso(fila.get("Fecha elaboración")),
+            "fecha_vencimiento": valor_fecha_iso(fila.get("Fecha vencimiento")),
+            "numero_envases": limpiar_texto(fila.get("N° bolsas / bidones")),
+            "numero_trazabilidad": limpiar_texto(fila.get("N° bidón / bolsa")),
+            "inspeccion_visual": limpiar_texto(fila.get("Inspección visual")),
+            "observacion": limpiar_texto(fila.get("Observación")),
+        })
+
+    return {
+        "token": str(obtener_secret(("google_sheets", "token"))),
+        "accion": "guardar_elaboracion",
+        "elaboracion": {
+            "id_registro": id_registro,
+            "fecha": fecha_calculo.isoformat(),
+            "orden_elaboracion": orden.strip(),
+            "tipo_elaboracion": tipo_elaboracion,
+            "unidades": int(unidades),
+            "destino": destino.strip(),
+            "turno": turno,
+            "operador": operador.strip(),
+            "observacion_general": observacion_general.strip(),
+            "fecha_registro": datetime.now().isoformat(timespec="seconds"),
+        },
+        "detalle": detalle,
+    }
+
+
+def enviar_a_google_sheets(payload: dict) -> dict:
+    """Envía un registro JSON al Apps Script configurado en secrets."""
+    url = str(obtener_secret(("google_sheets", "apps_script_url")))
+    if not url.startswith("https://script.google.com/"):
+        raise ValueError("La URL de Apps Script configurada no es válida.")
+
+    solicitud = Request(
+        url=url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+
+    try:
+        with urlopen(solicitud, timeout=30) as respuesta:
+            contenido = respuesta.read().decode("utf-8")
+    except HTTPError as error:
+        detalle = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Google respondió HTTP {error.code}: {detalle[:300]}") from error
+    except URLError as error:
+        raise RuntimeError(f"No fue posible conectar con Google Sheets: {error.reason}") from error
+
+    try:
+        resultado = json.loads(contenido)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Apps Script devolvió una respuesta no válida.") from error
+
+    if not resultado.get("ok", False):
+        raise RuntimeError(resultado.get("mensaje", "El registro fue rechazado por Apps Script."))
+
+    return resultado
+
+
+# =====================================================
+# INICIO Y CARGA DE DATOS
+# =====================================================
+
+verificar_acceso()
 df_bbdd = cargar_bbdd()
 
 
@@ -715,6 +922,12 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+with st.sidebar:
+    st.caption("Sesión autorizada")
+    if st.button("Cerrar sesión"):
+        st.session_state.clear()
+        st.rerun()
+
 
 # =====================================================
 # FORMULARIO PRINCIPAL
@@ -727,44 +940,36 @@ with st.form("form_calculadora"):
     col1, col2, col3 = st.columns([1.1, 2.6, 1.0])
 
     with col1:
-        fecha_calculo = st.date_input(
-            "Fecha",
-            value=date.today()
-        )
+        fecha_calculo = st.date_input("Fecha", value=date.today())
 
     with col2:
         tipos_elaboracion = sorted(df_bbdd["Tipo de elaboración"].unique())
-
-        tipo_seleccionado = st.selectbox(
-            "Tipo de elaboración",
-            options=tipos_elaboracion,
-            index=0
-        )
+        tipo_seleccionado = st.selectbox("Tipo de elaboración", options=tipos_elaboracion)
 
     with col3:
-        unidades = st.number_input(
-            "Número de unidades",
-            min_value=1,
-            value=1,
-            step=1
-        )
+        unidades = st.number_input("Número de unidades", min_value=1, value=1, step=1)
 
     calcular = st.form_submit_button("Calcular materias primas")
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-
-# =====================================================
-# RESULTADO
-# =====================================================
-
 if calcular:
+    st.session_state["df_resultado"] = generar_calculo(df_bbdd, tipo_seleccionado, unidades)
+    st.session_state["fecha_calculo"] = fecha_calculo
+    st.session_state["tipo_seleccionado"] = tipo_seleccionado
+    st.session_state["unidades"] = unidades
+    st.session_state["df_registro"] = crear_tabla_registro(st.session_state["df_resultado"])
 
-    df_resultado = generar_calculo(
-        df_bbdd=df_bbdd,
-        tipo_elaboracion=tipo_seleccionado,
-        unidades=unidades
-    )
+
+# =====================================================
+# RESULTADO Y REGISTRO
+# =====================================================
+
+if "df_resultado" in st.session_state:
+    df_resultado = st.session_state["df_resultado"]
+    fecha_calculo = st.session_state["fecha_calculo"]
+    tipo_seleccionado = st.session_state["tipo_seleccionado"]
+    unidades = st.session_state["unidades"]
 
     df_mostrar = crear_tabla_resultado(df_resultado)
     df_detalle = crear_tabla_detalle(df_resultado)
@@ -783,72 +988,84 @@ if calcular:
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="seccion">Materias primas requeridas</div>', unsafe_allow_html=True)
+    st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
 
-    st.dataframe(
-        df_mostrar,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Materia prima": st.column_config.TextColumn(
-                "Materia prima",
-                width="large"
-            ),
-            "Código": st.column_config.TextColumn(
-                "Código",
-                width="medium"
-            ),
-            "Cantidad requerida": st.column_config.TextColumn(
-                "Cantidad requerida",
-                width="medium"
-            ),
-            "Unidad medida": st.column_config.TextColumn(
-                "Unidad medida",
-                width="small"
-            )
-        }
-    )
-
-    with st.expander("Ver detalle de cantidad unitaria", expanded=False):
-        st.dataframe(
-            df_detalle,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Materia prima": st.column_config.TextColumn(
-                    "Materia prima",
-                    width="large"
-                ),
-                "Código": st.column_config.TextColumn(
-                    "Código",
-                    width="medium"
-                )
-            }
-        )
+    with st.expander("Ver detalle de cantidad unitaria"):
+        st.dataframe(df_detalle, use_container_width=True, hide_index=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-    archivo_excel = convertir_excel(
-        df_resultado=df_resultado,
-        tipo_elaboracion=tipo_seleccionado,
-        fecha_calculo=fecha_calculo,
-        unidades=unidades
-    )
-
+    archivo_excel = convertir_excel(df_resultado, tipo_seleccionado, fecha_calculo, unidades)
     nombre_descarga = (
-        "CALCULO_MP_"
-        + nombre_archivo_seguro(tipo_seleccionado)
-        + "_"
-        + fecha_calculo.strftime("%Y%m%d")
-        + ".xlsx"
+        "CALCULO_MP_" + nombre_archivo_seguro(tipo_seleccionado) + "_" +
+        fecha_calculo.strftime("%Y%m%d") + ".xlsx"
     )
-
     st.download_button(
-        label="Descargar resultado en Excel",
+        "Descargar resultado en Excel",
         data=archivo_excel,
         file_name=nombre_descarga,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="seccion">Registro de elaboración y trazabilidad</div>', unsafe_allow_html=True)
+
+    with st.form("form_registro", clear_on_submit=False):
+        c1, c2, c3, c4 = st.columns([1.4, 1.3, 0.7, 1.3])
+        with c1:
+            orden = st.text_input("Orden de elaboración")
+        with c2:
+            destino = st.text_input("Destino", placeholder="Ejemplo: Jarabe 1")
+        with c3:
+            turno = st.selectbox("Turno", ["A", "B", "C"])
+        with c4:
+            operador = st.text_input("Operador")
+
+        observacion_general = st.text_area("Observación general", height=80)
+
+        df_registro_editado = st.data_editor(
+            st.session_state["df_registro"],
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            disabled=["Materia prima", "Código", "Cantidad requerida", "Unidad medida"],
+            column_config={
+                "Cantidad requerida": st.column_config.NumberColumn(format="%.4f"),
+                "Fecha elaboración": st.column_config.DateColumn(format="DD-MM-YYYY"),
+                "Fecha vencimiento": st.column_config.DateColumn(format="DD-MM-YYYY", required=True),
+                "Inspección visual": st.column_config.SelectboxColumn(
+                    options=["Cumple", "No cumple"], required=True
+                ),
+            },
+            key="editor_trazabilidad",
+        )
+
+        guardar = st.form_submit_button("Guardar registro en Google Sheets")
+
+    if guardar:
+        st.session_state["df_registro"] = df_registro_editado
+        errores = validar_registro(orden, destino, operador, df_registro_editado)
+
+        if errores:
+            for error in errores:
+                st.error(error)
+        else:
+            try:
+                payload = construir_payload(
+                    fecha_calculo, orden, tipo_seleccionado, unidades,
+                    destino, turno, operador, observacion_general,
+                    df_registro_editado,
+                )
+                with st.spinner("Guardando registro..."):
+                    respuesta = enviar_a_google_sheets(payload)
+                st.success(
+                    "Registro guardado correctamente. ID: " +
+                    respuesta.get("id_registro", payload["elaboracion"]["id_registro"])
+                )
+            except Exception as error:
+                st.error(f"No fue posible guardar el registro: {error}")
+
+    st.markdown('</div>', unsafe_allow_html=True)
 else:
     st.markdown(
         """
@@ -867,7 +1084,7 @@ else:
 st.markdown(
     """
     <div class="footer-app">
-        Proyecto CCU - Elaboración | BBDD Parquet
+        Proyecto CCU - Elaboración | BBDD Parquet + Google Sheets
     </div>
     """,
     unsafe_allow_html=True
